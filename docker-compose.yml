@@ -1,0 +1,125 @@
+x-python-base: &python-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  volumes:
+    - commerce-data:/data
+  environment:
+    - DB_PATH=/data/commerce.db
+    - CHROMA_HOST=chromadb
+    - CHROMA_PORT=8000
+    - REDIS_URL=redis://redis:6379
+    - GROQ_API_KEY=${GROQ_API_KEY}
+    - ANONYMIZED_TELEMETRY=False
+  depends_on:
+    chromadb:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  generator:
+    <<: *python-base
+    command: python -m data_generator.main
+    container_name: ic-generator
+
+  pipeline:
+    <<: *python-base
+    command: python -m pipeline.main
+    container_name: ic-pipeline
+
+  api:
+    <<: *python-base
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    container_name: ic-api
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  chromadb:
+    # Pinned to match the chromadb==0.6.3 client in requirements.txt. A newer
+    # server (latest) breaks the old client's wire protocol → KeyError '_type'.
+    image: chromadb/chroma:0.6.3
+    container_name: ic-chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/.chroma
+    healthcheck:
+      # chroma:latest ships no python/curl/wget — only bash. Use bash's /dev/tcp
+      # to confirm the server is accepting connections on its port.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ic-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  langfuse-db:
+    image: postgres:15-alpine
+    container_name: ic-langfuse-db
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: ic-langfuse
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: supersecret-change-in-prod
+      SALT: supersalt-change-in-prod
+      NEXTAUTH_URL: http://localhost:3001
+      TELEMETRY_ENABLED: "false"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8000
+    container_name: ic-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  commerce-data:
+  chroma-data:
+  langfuse-db-data:
