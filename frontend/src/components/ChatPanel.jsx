@@ -9,9 +9,21 @@ const SUGGESTED = [
 
 function Message({ msg }) {
   const isUser = msg.role === 'user'
+  if (msg.type === 'guardrail') {
+    return (
+      <div className="flex justify-center mb-2">
+        <span className="text-[11px] text-amber-300 bg-amber-900/30 border border-amber-800 rounded-full px-3 py-0.5">
+          guardrail · {msg.guard} {msg.action}
+        </span>
+      </div>
+    )
+  }
+  const bubble = msg.type === 'error'
+    ? 'bg-red-900/40 border border-red-700 text-red-200'
+    : isUser ? 'bg-indigo-700 text-white' : 'bg-gray-800 text-gray-200'
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-3`}>
-      <div className={`max-w-[80%] rounded-xl px-4 py-2 text-sm ${isUser ? 'bg-indigo-700 text-white' : 'bg-gray-800 text-gray-200'}`}>
+      <div className={`max-w-[80%] rounded-xl px-4 py-2 text-sm ${bubble}`}>
         {msg.type === 'tool_call' ? (
           <span className="text-indigo-300 font-mono text-xs">
             Calling {msg.tool}({JSON.stringify(msg.args)})...
@@ -46,6 +58,10 @@ export default function ChatPanel({ api }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: q, thread_id: threadId }),
       })
+      if (!res.ok) {
+        const body = await res.text()
+        throw new Error(`API ${res.status}: ${body.slice(0, 200)}`)
+      }
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let buf = ''
@@ -67,6 +83,10 @@ export default function ChatPanel({ api }) {
             setMessages(prev => [...prev, { role: 'tool', type: 'tool_call', tool: ev.tool, args: ev.args }])
           } else if (ev.type === 'hitl_alert') {
             setMessages(prev => [...prev, { role: 'assistant', content: 'HITL Alert raised — check the queue.' }])
+          } else if (ev.type === 'guardrail') {
+            setMessages(prev => [...prev, { role: 'tool', type: 'guardrail', guard: ev.guard, action: ev.action }])
+          } else if (ev.type === 'error') {
+            setMessages(prev => [...prev, { role: 'assistant', type: 'error', content: `The agent hit an error: ${ev.message}` }])
           }
         }
       }

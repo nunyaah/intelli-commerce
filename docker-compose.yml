@@ -6,11 +6,17 @@ x-python-base: &python-base
     - commerce-data:/data
   environment:
     - DB_PATH=/data/commerce.db
+    - RELIABILITY_DB=/data/reliability.db
     - CHROMA_HOST=chromadb
     - CHROMA_PORT=8000
     - REDIS_URL=redis://redis:6379
     - GROQ_API_KEY=${GROQ_API_KEY}
     - ANONYMIZED_TELEMETRY=False
+    # Optional observability integrations (lazy; no-ops when unset):
+    - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse:3000}
+    - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+    - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+    - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   depends_on:
     chromadb:
       condition: service_healthy

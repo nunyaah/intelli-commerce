@@ -1,0 +1,54 @@
+name: Agent Evals & Regression Gate
+
+# Tests for the AI agent: runs the eval suite on every change and blocks the
+# build on a statistically significant quality regression or a budget breach.
+# Runs entirely in deterministic mock mode — no API keys, no paid credits.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit tests (graders, stats, guardrails, gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run pytest
+        run: pytest -q
+
+  regression-gate:
+    name: Eval regression gate
+    runs-on: ubuntu-latest
+    env:
+      RELIABILITY_MOCK: "1"
+      RELIABILITY_DB: ".reliability/ci.db"
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run eval suite + gate vs committed baseline
+        run: |
+          python -m reliability.cli gate \
+            --mock \
+            --baseline reliability/baselines/baseline.json \
+            --min-pass-rate 0.8 \
+            --json
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-store
+          path: .reliability/
+          if-no-files-found: ignore

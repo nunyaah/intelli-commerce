@@ -5,7 +5,8 @@ sys.path.insert(0, "/app")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import chat, hitl, metrics
+from api.routes import chat, hitl, metrics, reliability_api
+from reliability.store import init_store
 from shared.db import init_db
 
 app = FastAPI(title="IntelliCommerce API", version="1.0.0")
@@ -21,11 +22,13 @@ app.add_middleware(
 app.include_router(chat.router, prefix="/api")
 app.include_router(metrics.router, prefix="/api")
 app.include_router(hitl.router, prefix="/api")
+app.include_router(reliability_api.router, prefix="/api")
 
 
 @app.on_event("startup")
 def on_startup():
     init_db()
+    init_store()
 
 
 @app.get("/health")

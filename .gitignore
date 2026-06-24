@@ -12,6 +12,8 @@ node_modules/
 frontend/dist/
 *.db
 *.sqlite
+.reliability/
 .DS_Store
 logs.md
 project.md
+BUILD_PROMPT.md

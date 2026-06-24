@@ -5,8 +5,14 @@ import time
 DB_PATH = os.environ.get("DB_PATH", "/data/commerce.db")
 
 
+def _db_path() -> str:
+    # Read at call time so the reliability suite can point the agent at a
+    # deterministic fixture DB by setting DB_PATH, without import-order issues.
+    return os.environ.get("DB_PATH", DB_PATH)
+
+
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(_db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
     # Wait up to 30s for a lock instead of failing instantly under the
     # concurrent writes from the generator threads + pipeline.
@@ -23,7 +29,7 @@ def _enable_wal():
     # Retry briefly; whichever service wins, the rest see WAL already enabled.
     for _ in range(20):
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=30)
+            conn = sqlite3.connect(_db_path(), timeout=30)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.close()
             return
@@ -92,6 +98,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS hitl_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             thread_id TEXT,
+            trace_id TEXT,
+            query TEXT,
             anomaly_type TEXT,
             description TEXT,
             metric_value REAL,
@@ -101,5 +109,20 @@ def init_db():
             resolved_at TEXT
         );
     """)
+    _migrate(conn)
     conn.commit()
     conn.close()
+
+
+def _migrate(conn):
+    """Idempotently add columns introduced after a table was first created.
+    CREATE TABLE IF NOT EXISTS never alters an existing table, so deployments
+    with an older DB on a persistent volume need this to self-heal."""
+    expected = {
+        "hitl_queue": {"trace_id": "TEXT", "query": "TEXT"},
+    }
+    for table, cols in expected.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, coltype in cols.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")

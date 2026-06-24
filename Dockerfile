@@ -18,6 +18,7 @@ COPY data_generator/ ./data_generator/
 COPY pipeline/ ./pipeline/
 COPY agent/ ./agent/
 COPY api/ ./api/
+COPY reliability/ ./reliability/
 
 EXPOSE 8000
 

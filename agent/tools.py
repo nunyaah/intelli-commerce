@@ -7,9 +7,6 @@ from datetime import datetime, timedelta
 sys.path.insert(0, "/app")
 from shared.db import get_conn
 
-import redis as redis_lib
-import chromadb
-from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
 from langchain_core.tools import tool
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379")
@@ -18,31 +15,69 @@ CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8000"))
 
 _redis = None
 _collection = None
-_ef = ONNXMiniLM_L6_V2()
+_ef = None
 
 
 def _redis_client():
     global _redis
     if _redis is None:
+        import redis as redis_lib
+
         _redis = redis_lib.from_url(REDIS_URL)
     return _redis
 
 
 def _chroma_collection():
-    global _collection
+    # chromadb + the ONNX embedding model are imported lazily so importing the
+    # agent (e.g. for offline eval / CI) doesn't require these heavy deps and a
+    # running vector store. search_tickets degrades gracefully if they're absent.
+    global _collection, _ef
     if _collection is None:
+        import chromadb
+        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+
+        if _ef is None:
+            _ef = ONNXMiniLM_L6_V2()
         client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
         _collection = client.get_or_create_collection("tickets", embedding_function=_ef)
     return _collection
 
 
+def _sql_verdict(sql: str):
+    from reliability.guardrails.sql_guard import validate_sql
+
+    return validate_sql(sql)
+
+
+def _log_sql_block(sql: str, reason: str) -> None:
+    # Link the block to the active run when one is set (live chat / eval).
+    try:
+        from reliability.guardrails.context import get_context
+        from reliability.store import log_guardrail_event
+
+        trace_id, thread_id = get_context()
+        log_guardrail_event(trace_id, thread_id, "sql_safety", "block", "high",
+                            {"sql": sql, "reason": reason})
+    except Exception:
+        pass
+
+
 def _cached(key: str, fn, ttl: int = 60) -> str:
-    r = _redis_client()
-    hit = r.get(key)
-    if hit:
-        return hit.decode()
+    # Redis is a rate-limit optimisation, not a correctness dependency. When it
+    # is unavailable (offline eval / CI), degrade transparently to a direct call
+    # so the agent — and the reliability suite that drives it — still works.
+    try:
+        r = _redis_client()
+        hit = r.get(key)
+        if hit:
+            return hit.decode()
+    except Exception:
+        return fn()
     result = fn()
-    r.setex(key, ttl, result)
+    try:
+        r.setex(key, ttl, result)
+    except Exception:
+        pass
     return result
 
 
@@ -50,8 +85,12 @@ def _cached(key: str, fn, ttl: int = 60) -> str:
 def query_orders(sql: str) -> str:
     """Run a read-only SQL SELECT against the orders table.
     Use for revenue analysis, order counts, product performance, fraud stats."""
-    if not sql.strip().upper().startswith("SELECT"):
-        return "Error: only SELECT statements are permitted."
+    # AST-based safety guard (single read-only SELECT, known tables only). This
+    # is the runtime enforcement point and shares logic with the eval grader.
+    verdict = _sql_verdict(sql)
+    if not verdict.ok:
+        _log_sql_block(sql, verdict.reason)
+        return f"Blocked by SQL guardrail: {verdict.reason}"
 
     def run():
         conn = get_conn()
@@ -82,10 +121,42 @@ def search_tickets(query: str, k: int = 4) -> str:
             for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
                 out.append(f"[{meta['category'].upper()} / {meta['urgency']}] {doc}")
             return "\n\n".join(out)
-        except Exception as e:
-            return f"Search error: {e}"
+        except Exception:
+            # Vector store unavailable (offline eval / CI / outage): fall back to
+            # a keyword search over SQLite so the agent still returns real,
+            # grounded ticket data instead of failing.
+            return _keyword_ticket_search(query, k)
 
     return _cached(f"tickets:{query}:{k}", run, ttl=30)
+
+
+def _keyword_ticket_search(query: str, k: int) -> str:
+    try:
+        conn = get_conn()
+        terms = [t for t in query.lower().split() if len(t) > 3] or [query.lower()]
+        like = " OR ".join(["LOWER(message) LIKE ? OR LOWER(subject) LIKE ?"] * len(terms))
+        params = []
+        for t in terms:
+            params.extend([f"%{t}%", f"%{t}%"])
+        rows = conn.execute(
+            f"SELECT category, urgency, subject, message FROM tickets WHERE {like} "
+            f"ORDER BY created_at DESC LIMIT ?",
+            (*params, min(k, 10)),
+        ).fetchall()
+        if not rows:
+            rows = conn.execute(
+                "SELECT category, urgency, subject, message FROM tickets "
+                "ORDER BY created_at DESC LIMIT ?",
+                (min(k, 10),),
+            ).fetchall()
+        conn.close()
+        if not rows:
+            return "No tickets found."
+        return "\n\n".join(
+            f"[{r['category'].upper()} / {r['urgency']}] {r['subject']}: {r['message']}" for r in rows
+        )
+    except Exception as e:
+        return f"Search error: {e}"
 
 
 @tool
